@@ -347,7 +347,7 @@ Panel {
       Item {
         ProtonAuthIcon {
           anchors.centerIn: parent
-          iconSize: Style.space(16)
+          iconSize: Style.space(12)
           color: root.healthy ? root.barForeground : root.dimForeground
           iconOpacity: root.healthy ? 1.0 : 0.6
         }
