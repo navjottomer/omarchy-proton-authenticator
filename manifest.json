@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "id": "navjottomer.proton-authenticator",
+  "name": "Authenticator",
+  "version": "2.0.0",
+  "author": "navjottomer",
+  "license": "MIT",
+  "description": "Proton Authenticator TOTP codes in the Omarchy bar: type to search, Enter to copy, pinned and recently used first. Reads the official app's local vault; no network.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Authenticator",
+    "description": "Search and copy TOTP codes from Proton Authenticator.",
+    "category": "Security",
+    "aliases": [
+      "protonauth",
+      "proton-authenticator",
+      "authenticator",
+      "2fa",
+      "totp",
+      "otp"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "sortMode": "recent",
+      "closeOnCopy": true,
+      "notifyOnCopy": true,
+      "clipboardClearSec": 20,
+      "demoMode": false
+    },
+    "schema": [
+      {
+        "key": "sortMode",
+        "type": "enum",
+        "label": "Sort accounts by",
+        "options": [
+          "recent",
+          "alpha",
+          "vault"
+        ],
+        "defaultValue": "recent"
+      },
+      {
+        "key": "closeOnCopy",
+        "type": "boolean",
+        "label": "Close the panel after copying a code",
+        "defaultValue": true
+      },
+      {
+        "key": "notifyOnCopy",
+        "type": "boolean",
+        "label": "Show a notification after copying",
+        "defaultValue": true
+      },
+      {
+        "key": "clipboardClearSec",
+        "type": "integer",
+        "label": "Clear copied code from clipboard after (seconds, 0 = never)",
+        "min": 0,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 20
+      },
+      {
+        "key": "demoMode",
+        "type": "boolean",
+        "label": "Demo mode (fake accounts, for screenshots)",
+        "defaultValue": false
+      }
+    ]
+  }
+}

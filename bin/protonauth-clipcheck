@@ -1,0 +1,51 @@
+#!/bin/sh
+# protonauth-clipcheck (from io.github.mapski.proton-authenticator): does the Wayland clipboard still hold the code we copied?
+#
+# Reads the expected code (1-10 ASCII digits) on stdin, never argv, and prints
+# exactly one fixed token on stdout: "match" or "nomatch". Panel.qml runs this
+# as a short-lived child so no clipboard data ever reaches the persistent shell.
+#
+# Bounds (the clipboard owner is an arbitrary Wayland client):
+#  - wl-paste --type text: only text content is requested; if the owner offers
+#    no text type, wl-paste fails and the answer is "nomatch".
+#  - head -c: at most len(code)+1 bytes are read from wl-paste, so a longer
+#    clipboard can never match and never gets buffered.
+#  - timeout: an owner that never writes or never closes the pipe is killed
+#    after 2 s (KILL 1 s later), even if SIGPIPE is ignored.
+#  - The comparison is on hex bytes (od), so NUL bytes or a trailing newline
+#    can't make a different clipboard compare equal.
+set -u
+LC_ALL=C
+export LC_ALL
+
+# Absolute paths so PATH can't substitute these for the short-lived child.
+WL_PASTE=/usr/bin/wl-paste
+HEAD=/usr/bin/head
+TIMEOUT=/usr/bin/timeout
+OD=/usr/bin/od
+TR=/usr/bin/tr
+
+nomatch() {
+  printf 'nomatch\n'
+  exit 0
+}
+
+hex() { "$OD" -An -v -tx1 | "$TR" -d ' \n'; }
+
+# The code as written by Panel.qml (no newline); anything else is refused.
+want=$("$HEAD" -c 11)
+case $want in
+  '' | *[!0-9]*) nomatch ;;
+  *) ;;
+esac
+[ "${#want}" -le 10 ] || nomatch
+
+limit=$((${#want} + 1))
+got=$("$TIMEOUT" -k 1 2 "$WL_PASTE" --no-newline --type text 2>/dev/null | "$HEAD" -c "$limit" | hex)
+expected=$(printf '%s' "$want" | hex)
+
+if [ -n "$got" ] && [ "$got" = "$expected" ]; then
+  printf 'match\n'
+else
+  nomatch
+fi
