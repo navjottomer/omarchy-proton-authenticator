@@ -74,42 +74,76 @@ Panel {
   }
 
   Component.onCompleted: {
-    Quickshell.execDetached(["/usr/bin/mkdir", "-p", "-m", "0700", stateDir])
+    loadPrefs()
     svc.check()
   }
 
   // ---------- Pins and recent use ----------
-  // Stored as entry keys (vault ids) only, never codes or seeds.
-  // Read once at startup; this panel is the only writer, so re-reading on
-  // open could only race a fresh pin. The folder is created here (0700) so
-  // the first save has somewhere to go.
+  // Stored as entry keys (vault ids) only, never codes or seeds. All file
+  // access goes through bin/protonauth-prefs, which keeps the state folder
+  // private (0700, owned by you, no symlinks) and writes via temp file +
+  // rename. Read once at startup; this panel is the only writer.
   property var pins: ({})
   property var used: ({})
-  readonly property string stateDir: {
-    var xdg = Quickshell.env("XDG_STATE_HOME")
-    var base = xdg && String(xdg).charAt(0) === "/" ? String(xdg) : Quickshell.env("HOME") + "/.local/state"
-    return base + "/" + moduleName
+  property bool _prefsDirty: false   // changed while a write was running
+  property bool _prefsTouched: false // changed since startup
+  readonly property string prefsToolPath: {
+    var base = pluginDir
+    if (base.length && base.charAt(base.length - 1) !== "/") base += "/"
+    return base + "bin/protonauth-prefs"
   }
 
-  FileView {
-    id: prefsFile
-    path: root.stateDir + "/prefs.json"
-    watchChanges: false
-    printErrors: false
-    onLoaded: {
-      try {
-        var d = JSON.parse(text())
-        root.pins = (d && typeof d.pins === "object" && d.pins) ? d.pins : {}
-        root.used = (d && typeof d.used === "object" && d.used) ? d.used : {}
-      } catch (e) {
-        root.pins = {}
-        root.used = {}
+  function loadPrefs() {
+    if (prefsRead.running || !prefsToolPath.endsWith("/bin/protonauth-prefs")) return
+    prefsRead.command = [prefsToolPath, "read"]
+    prefsRead.running = true
+  }
+
+  // One write at a time; a change made while one is running is written next.
+  function savePrefs() {
+    if (!prefsToolPath.endsWith("/bin/protonauth-prefs")) return
+    _prefsTouched = true
+    if (prefsWrite.running) { _prefsDirty = true; return }
+    _prefsDirty = false
+    prefsWrite.command = [prefsToolPath, "write"]
+    prefsWrite.stdinEnabled = true
+    prefsWrite.running = true
+  }
+
+  Process {
+    id: prefsRead
+    running: false
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // A change made before the read finished wins over the stored copy.
+        if (root._prefsTouched) return
+        try {
+          var d = JSON.parse(text.length <= 262144 ? text : "")
+          root.pins = (d && typeof d.pins === "object" && d.pins) ? d.pins : {}
+          root.used = (d && typeof d.used === "object" && d.used) ? d.used : {}
+        } catch (e) {
+          root.pins = {}
+          root.used = {}
+        }
       }
     }
   }
 
-  function savePrefs() {
-    prefsFile.setText(JSON.stringify({ pins: root.pins, used: root.used }) + "\n")
+  Process {
+    id: prefsWrite
+    running: false
+    command: []
+    stdinEnabled: false
+    onStarted: {
+      write(JSON.stringify({ pins: root.pins, used: root.used }) + "\n")
+      stdinEnabled = false // EOF: the helper has the document
+    }
+    onExited: {
+      stdinEnabled = false
+      if (root._prefsDirty) root.savePrefs()
+    }
   }
 
   function togglePin(entry) {

@@ -125,7 +125,10 @@ again when the codes run low, about every five minutes.
   in a separate short-lived process (`bin/protonauth-clipcheck`), which only
   answers "match" or "no match".
 - **Stored data.** Only pinned entry IDs and last-used times, in
-  `~/.local/state/navjottomer.proton-authenticator/prefs.json`.
+  `~/.local/state/navjottomer.proton-authenticator/prefs.json`. The folder must
+  be private (mode 700, owned by you, not a symlink) or it is refused; the file
+  is written to a temp file and renamed into place, and is never read or
+  written through a symlink (`bin/protonauth-prefs`).
 - Notifications show the account name; turn them off with
   `omarchy bar set navjottomer.proton-authenticator notifyOnCopy false`.
 
