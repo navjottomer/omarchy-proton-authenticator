@@ -6,6 +6,19 @@ Omarchy bar widget for Proton Authenticator TOTP codes. Forked from
 (`bin/protonauth-clipcheck`) are the upstream code with small changes; the
 panel is rewritten.
 
+## Install
+
+    git clone https://github.com/navjottomer/omarchy-proton-authenticator \
+      ~/.config/omarchy/plugins/navjottomer.proton-authenticator
+
+Then add `{"id": "navjottomer.proton-authenticator"}` to a bar section in
+`~/.config/omarchy/shell.json` and run `omarchy restart shell`. Open
+Proton Authenticator once first so its vault and keyring entry exist.
+
+Optional hotkey, in `~/.config/hypr/bindings.lua`:
+
+    o.bind("SUPER + CTRL + U", "Authenticator", "omarchy-shell shell toggle navjottomer.proton-authenticator")
+
 ## Use
 
 Open it from the bar icon or the hotkey, then:
