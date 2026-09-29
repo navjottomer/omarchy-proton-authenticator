@@ -1,5 +1,6 @@
 #!/bin/sh
-# protonauth-clipcheck (from io.github.mapski.proton-authenticator): does the Wayland clipboard still hold the code we copied?
+# protonauth-clipcheck: does the Wayland clipboard still hold the code we copied?
+# Based on io.github.mapski.proton-authenticator.
 #
 # Reads the expected code (1-10 ASCII digits) on stdin, never argv, and prints
 # exactly one fixed token on stdout: "match" or "nomatch". Panel.qml runs this

@@ -73,12 +73,16 @@ Panel {
     return Math.min(n, 600)
   }
 
-  Component.onCompleted: svc.check()
+  Component.onCompleted: {
+    Quickshell.execDetached(["/usr/bin/mkdir", "-p", "-m", "0700", stateDir])
+    svc.check()
+  }
 
   // ---------- Pins and recent use ----------
   // Stored as entry keys (vault ids) only, never codes or seeds.
   // Read once at startup; this panel is the only writer, so re-reading on
-  // open could only race a fresh pin.
+  // open could only race a fresh pin. The folder is created here (0700) so
+  // the first save has somewhere to go.
   property var pins: ({})
   property var used: ({})
   readonly property string stateDir: {

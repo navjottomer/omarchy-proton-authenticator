@@ -11,7 +11,6 @@ import contextlib
 import json
 import os
 import re
-import secrets
 import selectors
 import shutil
 import signal
@@ -44,13 +43,8 @@ SERVICE = "com.proton.authenticator"
 SECRET_TOOL = "/usr/bin/secret-tool" if os.path.exists("/usr/bin/secret-tool") else "secret-tool"
 ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$")
 
-PLUGIN_ID = "navjottomer.proton-authenticator"
-# Ownership marker written into every temp dir this installation creates.
-# uninstall.sh only removes a leftover protonauth-idb-* dir whose marker holds
-# this installation's id (see install_id()).
+# Prefix of the private temp dir holding each run's copy of the vault.
 TMP_PREFIX = "navauth-idb-"
-TMP_MARKER = "." + PLUGIN_ID
-INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # Bounds on everything this helper reads from other programs or writes to the
 # shell (omarchy-shell buffers our whole stdout, so it must stay small).
@@ -66,45 +60,6 @@ MAX_OUTPUT_BYTES = 1024 * 1024
 # this process; only these short-lived codes do.
 DEFAULT_WINDOW = 10
 MAX_WINDOW = 20
-
-
-def state_dir() -> Path:
-    xdg = os.environ.get("XDG_STATE_HOME", "")
-    base = Path(xdg) if xdg.startswith("/") else Path.home() / ".local/state"
-    return base / PLUGIN_ID
-
-
-def _read_id(f: Path) -> str:
-    """The id stored in f, or "" if missing/invalid. Never follows a symlink."""
-    try:
-        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return ""
-    with os.fdopen(fd) as fh:
-        value = fh.read(128).strip()
-    return value if INSTALL_ID_RE.match(value) else ""
-
-
-def install_id() -> str:
-    """Per-installation random id (created by install.sh, or here on first use)."""
-    d = state_dir()
-    f = d / "install-id"
-    value = _read_id(f)
-    if value:
-        return value
-    d.mkdir(mode=0o700, parents=True, exist_ok=True)
-    value = secrets.token_hex(16)
-    try:
-        # O_EXCL: never overwrite an id another process just wrote.
-        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        existing = _read_id(f)
-        if existing:
-            return existing
-        raise Err("VAULT_UNREADABLE", f"invalid install id in {f}") from None
-    with os.fdopen(fd, "w") as fh:
-        fh.write(value + "\n")
-    return value
 
 
 class Err(Exception):
@@ -138,15 +93,11 @@ def find_idb() -> Path:
 def vault_snapshot(src: Path):
     """Private read-only copy of the vault DB in a fresh mkdtemp() dir.
 
-    The dir carries an ownership marker with this installation's id and is
-    removed (only that exact path) when the block exits, even on errors.
+    The dir is removed (only that exact path) when the block exits, even on
+    errors.
     """
-    owner = install_id()
     tmpdir = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))  # unique, 0700, ours
     try:
-        fd = os.open(tmpdir / TMP_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(owner + "\n")
         tmp = tmpdir / "idb.sqlite3"
         os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))  # 0600 before any data
         src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
@@ -413,10 +364,10 @@ DEMO_ACCOUNTS = [
 ]
 
 
-def demo(window: int, repeat: int = 1) -> dict:
+def demo(window: int) -> dict:
     now = int(time.time())
     entries = []
-    for i, (issuer, account, seed, period, digits) in enumerate(DEMO_ACCOUNTS * repeat):
+    for i, (issuer, account, seed, period, digits) in enumerate(DEMO_ACCOUNTS):
         totp = pyotp.TOTP(seed, digits=digits, interval=period)
         entries.append({
             "id": f"demo-{i}", "issuer": issuer, "account": account,
@@ -461,7 +412,6 @@ def main() -> int:
                     help="print fake demo accounts (for screenshots); never touches the vault")
     ap.add_argument("--window", type=int, default=DEFAULT_WINDOW,
                     help=f"codes per entry, current one first (1-{MAX_WINDOW})")
-    ap.add_argument("--demo-repeat", type=int, default=1, help=argparse.SUPPRESS)
     ap.add_argument("--version", action="version", version=f"protonauth-list {__version__}")
     args = ap.parse_args()
     window = max(1, min(MAX_WINDOW, args.window))
@@ -470,7 +420,7 @@ def main() -> int:
         return 1
     try:
         if args.demo:
-            emit(demo(window, max(1, min(10, args.demo_repeat))))
+            emit(demo(window))
             return 0
         if args.check:
             emit(check())
