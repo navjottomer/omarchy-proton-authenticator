@@ -1,67 +1,157 @@
-# Authenticator (navjottomer.proton-authenticator)
+# Omarchy Proton Authenticator
 
-Omarchy bar widget for Proton Authenticator TOTP codes. Forked from
-[mapski/omarchy.proton.auth.git-plugin](https://github.com/mapski/omarchy.proton.auth.git-plugin)
-(MIT). The vault reader (`bin/protonauth_list.py`) and clipboard check
-(`bin/protonauth-clipcheck`) are the upstream code with small changes; the
-panel is rewritten.
+Your [Proton Authenticator](https://proton.me/authenticator) 2FA codes in the
+Omarchy bar. Open the panel, type a few letters, press Enter: the code is on
+your clipboard. No app window, no network.
+
+<p align="center"><img src="preview.png" alt="Authenticator panel in the Omarchy bar" width="480"></p>
+
+## Features
+
+- **Launcher-style search.** The search field has focus as soon as the panel
+  opens; Enter copies the top match.
+- **Pinned and recent first.** Pin the accounts you use most; the rest are
+  ordered by when you last copied them.
+- **Next code too.** Shift+Enter copies the code for the next period, and the
+  footer shows it for the selected account.
+- **Follows your theme.** Built from the stock Omarchy panel parts, so colours,
+  fonts and borders match the built-in panels.
+- **Clipboard hygiene.** Codes are copied with `--sensitive` and cleared after
+  20 seconds if they are still on the clipboard.
+- **Light.** The vault is read about once every five minutes while the panel
+  is open, not every second.
+
+## Requirements
+
+- [Omarchy](https://omarchy.org) with the Quickshell-based Omarchy shell
+- Proton Authenticator for Linux (`proton-authenticator-bin` on the AUR),
+  opened and signed in at least once so its vault and keyring entry exist
+- `python-cryptography`, `python-pyotp` (vault decryption and TOTP)
+- `libsecret` (`secret-tool`, to read the vault key from the keyring)
+- `wl-clipboard`, `libnotify`
+
+```sh
+omarchy pkg add python-cryptography python-pyotp libsecret wl-clipboard libnotify
+omarchy pkg aur add proton-authenticator-bin
+```
 
 ## Install
 
-    omarchy plugin add https://github.com/navjottomer/omarchy-proton-authenticator.git --enable
+```sh
+omarchy plugin add https://github.com/navjottomer/omarchy-proton-authenticator.git --enable
+```
 
-This clones it into `~/.config/omarchy/plugins/navjottomer.proton-authenticator/`, validates it, and puts
-it on the bar. Update later with `omarchy plugin update navjottomer.proton-authenticator`, remove with
-`omarchy plugin remove navjottomer.proton-authenticator`.
+This clones the plugin into `~/.config/omarchy/plugins/navjottomer.proton-authenticator/`,
+validates it and puts it on the bar.
 
-Open Proton Authenticator once first so its vault and keyring entry exist.
+Optional hotkey — add to `~/.config/hypr/bindings.lua`:
 
-Optional hotkey, in `~/.config/hypr/bindings.lua`:
+```lua
+o.bind("SUPER + CTRL + U", "Authenticator", "omarchy-shell shell toggle navjottomer.proton-authenticator")
+```
 
-    o.bind("SUPER + CTRL + U", "Authenticator", "omarchy-shell shell toggle navjottomer.proton-authenticator")
+## Update
 
-## Use
+```sh
+omarchy plugin update navjottomer.proton-authenticator
+```
 
-Open it from the bar icon or the hotkey, then:
+## Remove
+
+```sh
+omarchy plugin remove navjottomer.proton-authenticator
+```
+
+If you added the hotkey, delete that line from `bindings.lua`. The plugin also
+leaves a small state folder you can delete:
+`~/.local/state/navjottomer.proton-authenticator/` (pinned accounts and
+last-used times).
+
+## Usage
+
+Click the bar icon (or press your hotkey), then:
 
 | Key | Action |
 |---|---|
 | type | filter accounts |
 | Enter | copy the current code |
 | Shift+Enter | copy the next code |
-| Up/Down, Ctrl+J/K, PgUp/PgDn | move |
-| Ctrl+P / right-click | pin or unpin (pinned accounts sort first) |
+| Up/Down, Ctrl+J/K, PgUp/PgDn | move the selection |
+| Ctrl+P, or right-click a row | pin or unpin |
+| Tab / Shift+Tab | switch to the next bar panel |
 | Esc | close |
 
-Right-click the bar icon to reload from the vault.
+Click a row to copy its code. Right-click the bar icon to reload from the
+vault. The **Add in Proton Authenticator** button opens the app to add
+accounts.
 
-IPC: `omarchy shell navjottomer.proton-authenticator toggle`
+From scripts: `omarchy-shell navjottomer.proton-authenticator toggle`
 (also `open`, `close`, `refresh`, `clearClipboard`).
 
-## Settings (shell.json layout entry)
+## Settings
 
-| Key | Default | |
+Set with `omarchy bar set navjottomer.proton-authenticator <key> <value>`:
+
+| Key | Default | Meaning |
 |---|---|---|
-| `sortMode` | `recent` | after pinned: `recent` (last copied first, then A–Z), `alpha` or `vault` (app order) |
+| `sortMode` | `recent` | order after pinned accounts: `recent` (last copied first, then A–Z), `alpha`, or `vault` (the app's order) |
 | `closeOnCopy` | `true` | close the panel after copying |
-| `notifyOnCopy` | `true` | desktop notification naming the account |
-| `clipboardClearSec` | `20` | clear the copied code if still on the clipboard; `0` = never |
-| `demoMode` | `false` | fake accounts, never reads the vault |
+| `notifyOnCopy` | `true` | show a notification naming the copied account |
+| `clipboardClearSec` | `20` | seconds before a copied code is cleared from the clipboard (`0` = never) |
+| `demoMode` | `false` | show fake accounts, for screenshots; never reads the vault |
 
-## How it differs from upstream
+## How it works
 
-- The helper returns 10 codes per entry (about 5 minutes). The panel picks the
-  current one from its own clock, so the vault is decrypted about every 5
-  minutes while open instead of every second. Seeds still never leave the
-  helper; only codes do. Codes are dropped when the panel closes.
-- Search box has focus on open; the shell's key catcher is not used, so
-  letters like `j`, `k`, `x` reach the search box.
-- Compact rows, a countdown bar instead of a canvas ring per row, a scrolling
-  list with a visible scrollbar.
-- Pins and last-used times: `~/.local/state/navjottomer.proton-authenticator/prefs.json`
-  (entry ids only).
+The panel never touches the vault itself. It runs `bin/protonauth-list`, a
+small Python helper that:
 
-## Requirements
+1. makes a private read-only copy of Proton Authenticator's local database,
+2. reads the vault key from the Secret Service keyring with `secret-tool`,
+3. decrypts each entry (HKDF + AES-GCM) and computes its TOTP codes,
+4. prints labels and the next 10 codes per account as JSON, then deletes its copy.
 
-`proton-authenticator-bin`, `python-cryptography`, `python-pyotp`, `libsecret`,
-`wl-clipboard`, `libnotify`.
+The panel picks the current code from its own clock and only runs the helper
+again when the codes run low, about every five minutes.
+
+## Privacy and security
+
+- **No network.** Nothing is sent anywhere.
+- **Secrets stay in the helper.** TOTP secrets never leave the short-lived
+  helper process; the shell only ever holds labels and codes, and drops them
+  when the panel closes.
+- **Codes never on a command line.** Codes go to `wl-copy` on stdin, so they do
+  not show up in `ps`.
+- **The clipboard is never read into the shell.** Clearing checks the clipboard
+  in a separate short-lived process (`bin/protonauth-clipcheck`), which only
+  answers "match" or "no match".
+- **Stored data.** Only pinned entry IDs and last-used times, in
+  `~/.local/state/navjottomer.proton-authenticator/prefs.json`.
+- Notifications show the account name; turn them off with
+  `omarchy bar set navjottomer.proton-authenticator notifyOnCopy false`.
+
+Like every Omarchy plugin, this runs as unsandboxed code in your shell. Review
+it before installing.
+
+## Troubleshooting
+
+| Message | Fix |
+|---|---|
+| Open Proton Authenticator once… | the vault does not exist yet: open the app and sign in or add a code |
+| Keyring is locked | unlock your login keyring and reopen the panel |
+| Vault key not in keyring | open Proton Authenticator once so it stores its key |
+| Missing dependency | install the packages under [Requirements](#requirements) |
+
+If a change to the plugin does not show up, run `omarchy restart shell`.
+
+## Credits
+
+Forked from [mapski/omarchy.proton.auth.git-plugin](https://github.com/mapski/omarchy.proton.auth.git-plugin).
+The vault reader (`bin/protonauth_list.py`) and clipboard check
+(`bin/protonauth-clipcheck`) are based on that code; the panel is rewritten.
+
+Proton and Proton Authenticator are trademarks of Proton AG. This project is
+not affiliated with or endorsed by Proton.
+
+## License
+
+[MIT](LICENSE)
