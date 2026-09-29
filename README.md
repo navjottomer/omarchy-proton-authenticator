@@ -8,12 +8,13 @@ panel is rewritten.
 
 ## Install
 
-    git clone https://github.com/navjottomer/omarchy-proton-authenticator \
-      ~/.config/omarchy/plugins/navjottomer.proton-authenticator
+    omarchy plugin add https://github.com/navjottomer/omarchy-proton-authenticator.git --enable
 
-Then add `{"id": "navjottomer.proton-authenticator"}` to a bar section in
-`~/.config/omarchy/shell.json` and run `omarchy restart shell`. Open
-Proton Authenticator once first so its vault and keyring entry exist.
+This clones it into `~/.config/omarchy/plugins/navjottomer.proton-authenticator/`, validates it, and puts
+it on the bar. Update later with `omarchy plugin update navjottomer.proton-authenticator`, remove with
+`omarchy plugin remove navjottomer.proton-authenticator`.
+
+Open Proton Authenticator once first so its vault and keyring entry exist.
 
 Optional hotkey, in `~/.config/hypr/bindings.lua`:
 
