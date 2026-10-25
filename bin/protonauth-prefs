@@ -81,11 +81,13 @@ def checked_dir(create: bool) -> Path | None:
 
 
 def clean(data: object) -> dict:
-    """Keep only well-formed pins/used entries."""
+    """Keep only well-formed pins/used entries and the hide-codes choice."""
     out = {"pins": {}, "used": {}}
     if not isinstance(data, dict):
         return out
     pins, used = data.get("pins"), data.get("used")
+    if isinstance(data.get("hide"), bool):  # absent = follow the plugin setting
+        out["hide"] = data["hide"]
     if isinstance(pins, dict):
         for k, v in list(pins.items())[:MAX_KEYS]:
             if isinstance(k, str) and 0 < len(k) <= MAX_KEY_CHARS and v is True:
@@ -158,22 +160,29 @@ def hash_password(password: str, salt: bytes) -> bytes:
 
 
 def read_lock() -> dict:
-    """{"salt": bytes|None, "hash": bytes|None, "minutes": int}; a missing or
-    damaged file means no password is set."""
-    empty = {"salt": None, "hash": None, "minutes": DEFAULT_MINUTES}
+    """{"salt": bytes|None, "hash": bytes|None, "minutes": int, "damaged": bool}.
+
+    Only a missing file (or a state folder that does not exist yet) means no
+    password is set. A file that is there but cannot be trusted (not a regular
+    file, too big, bad JSON, wrong sizes) is "damaged": the panel stays locked
+    until the file is removed by hand."""
+    empty = {"salt": None, "hash": None, "minutes": DEFAULT_MINUTES, "damaged": False}
+    broken = {**empty, "damaged": True}
     d = checked_dir(create=False)
     if d is None:
         return empty
     try:
         fd = os.open(d / LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
+    except FileNotFoundError:
         return empty
+    except OSError:
+        return broken
     with os.fdopen(fd, "rb") as fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-            return empty
+            return broken
         raw = fh.read(LOCK_MAX_BYTES + 1)
     if len(raw) > LOCK_MAX_BYTES:
-        return empty
+        return broken
     try:
         doc = json.loads(raw)
         minutes = clamp_minutes(doc.get("minutes", DEFAULT_MINUTES))
@@ -183,10 +192,10 @@ def read_lock() -> dict:
         salt = base64.b64decode(salt, validate=True)
         digest = base64.b64decode(digest, validate=True)
     except (ValueError, TypeError, AttributeError, binascii.Error):
-        return empty
+        return broken
     if len(salt) != 16 or len(digest) != SCRYPT["dklen"]:
-        return empty
-    return {"salt": salt, "hash": digest, "minutes": minutes}
+        return broken
+    return {"salt": salt, "hash": digest, "minutes": minutes, "damaged": False}
 
 
 def write_lock(salt: bytes | None, digest: bytes | None, minutes: int) -> None:
@@ -196,6 +205,8 @@ def write_lock(salt: bytes | None, digest: bytes | None, minutes: int) -> None:
 
 
 def check_password(lock: dict, password: object) -> bool:
+    if lock["damaged"]:
+        return False
     if lock["hash"] is None:
         return True
     if not isinstance(password, str) or len(password) > PASSWORD_MAX_CHARS:
@@ -205,7 +216,8 @@ def check_password(lock: dict, password: object) -> bool:
 
 def lock_status() -> dict:
     lock = read_lock()
-    return {"set": lock["hash"] is not None, "minutes": lock["minutes"]}
+    return {"set": lock["hash"] is not None or lock["damaged"],
+            "damaged": lock["damaged"], "minutes": lock["minutes"]}
 
 
 def lock_verify(raw: bytes) -> str:
@@ -217,7 +229,7 @@ def lock_verify(raw: bytes) -> str:
 def lock_set(raw: bytes) -> str:
     """Document: {"current": str, "password": str, "minutes": int}, every key
     optional. A new or empty password (removal) needs the current one when a
-    password is already set; "minutes" alone needs nothing."""
+    password is already set, and so does a changed "minutes"."""
     if len(raw) > LOCK_MAX_BYTES:
         return "bad-input"
     try:
@@ -227,11 +239,15 @@ def lock_set(raw: bytes) -> str:
     if not isinstance(doc, dict):
         return "bad-input"
     lock = read_lock()
+    if lock["damaged"]:
+        return "damaged"
     salt, digest, minutes = lock["salt"], lock["hash"], lock["minutes"]
     if "minutes" in doc:
         if isinstance(doc["minutes"], bool) or not isinstance(doc["minutes"], int):
             return "bad-input"
         minutes = clamp_minutes(doc["minutes"])
+        if minutes != lock["minutes"] and not check_password(lock, doc.get("current", "")):
+            return "bad-current"
     if "password" in doc:
         new = doc["password"]
         if not isinstance(new, str):

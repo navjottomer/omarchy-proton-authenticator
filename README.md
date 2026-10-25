@@ -4,7 +4,7 @@ Your [Proton Authenticator](https://proton.me/authenticator) 2FA codes in the
 Omarchy bar. Open the panel, type a few letters, press Enter: the code is on
 your clipboard. No app window, no network.
 
-<p align="center"><img src="preview.png" alt="Authenticator panel in the Omarchy bar" width="480"></p>
+<p align="center"><img src="preview.png" alt="Authenticator panel: locked screen, account list with hidden codes, and settings" width="900"></p>
 
 ## Features
 
@@ -17,7 +17,7 @@ your clipboard. No app window, no network.
 - **Follows your theme.** Built from the stock Omarchy panel parts, so colours,
   fonts and borders match the built-in panels.
 - **Clipboard hygiene.** Codes are copied with `--sensitive` and cleared after
-  20 seconds if they are still on the clipboard.
+  60 seconds if they are still on the clipboard.
 - **Optional password lock.** Set a password in the panel's lock settings and
   the codes stay hidden until you enter it. See [Password lock](#password-lock).
 - **Light.** The vault is read about once every five minutes while the panel
@@ -80,6 +80,8 @@ Click the bar icon (or press your hotkey), then:
 | Shift+Enter | copy the next code |
 | Up/Down, Ctrl+J/K, PgUp/PgDn | move the selection |
 | Ctrl+P, or right-click a row | pin or unpin |
+| Ctrl+L | lock the panel now (when a password is set) |
+| Ctrl+R | show or hide the selected code (when `hideCodes` is on) |
 | Tab / Shift+Tab | switch to the next bar panel |
 | Esc | close |
 
@@ -92,21 +94,25 @@ From scripts: `omarchy-shell navjottomer.proton-authenticator toggle`
 
 ## Password lock
 
-Off by default. Click the lock button next to **Add in Proton Authenticator**
-(or press Ctrl+,) to open the lock settings:
+Off by default. Click the gear button next to **Add in Proton Authenticator**
+(or press Ctrl+,) to open the settings. Once a password is set, the lock
+button next to it (or Ctrl+L) locks the panel at once:
 
 - **Set, change or remove the password.** Changing or removing it asks for the
   current one. Use 4 to 256 characters.
+- **Hide codes.** A switch in the same view turns `hideCodes` on or off. It is saved with your pins and beats the plugin setting once you use it.
 - **Stay unlocked for N minutes.** After a correct password the panel stays
   open for this long, then locks again. `0` locks it as soon as you close the
-  panel. Default 10.
+  panel. Default 10. Changing it asks for the current password.
 
-While locked, no codes are read from the vault. After three wrong passwords the
+The panel also locks by itself within 10 seconds of the Omarchy screen lock
+turning on (lock key, idle lock, or before suspend). While locked, no codes are read from the vault. After three wrong passwords the
 field waits 5 seconds, then 10, up to 30. Restarting the shell locks it again.
 
 The password is stored as a salted scrypt hash in
 `~/.local/state/navjottomer.proton-authenticator/lock.json` (mode 600) and is
-only passed to the helper on stdin. Forgot it? Delete that file.
+only passed to the helper on stdin. Forgot it? Delete that file. A lock file
+that is there but damaged keeps the panel locked until you delete it.
 
 This keeps a passer-by out of the panel. It does not encrypt anything: the
 vault itself is still readable by any program running as you, and the Proton
@@ -121,7 +127,8 @@ Set with `omarchy bar set navjottomer.proton-authenticator <key> <value>`:
 | `sortMode` | `recent` | order after pinned accounts: `recent` (last copied first, then A–Z), `alpha`, or `vault` (the app's order) |
 | `closeOnCopy` | `true` | close the panel after copying |
 | `notifyOnCopy` | `true` | show a notification naming the copied account |
-| `clipboardClearSec` | `20` | seconds before a copied code is cleared from the clipboard (`0` = never) |
+| `hideCodes` | `false` | show `••• •••` instead of codes; a code appears under the mouse, or press Ctrl+R to show or hide the selected one |
+| `clipboardClearSec` | `60` | seconds before a copied code is cleared from the clipboard (`0` = never) |
 | `demoMode` | `false` | show fake accounts, for screenshots; never reads the vault |
 
 ## How it works

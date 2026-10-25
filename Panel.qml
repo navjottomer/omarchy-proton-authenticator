@@ -17,6 +17,8 @@ import "Model.js" as Model
 //   Up/Down, Ctrl+J/K  move         Enter        copy current code
 //   PgUp/PgDn          move by 5    Shift+Enter  copy next code
 //   Tab/Shift+Tab      next panel   Ctrl+P       pin / unpin
+//   Ctrl+L             lock now     Ctrl+,       lock settings
+//   Ctrl+R             show/hide the selected code (hideCodes)
 //   Esc                close
 Panel {
   id: root
@@ -36,6 +38,7 @@ Panel {
   property string searchText: ""
   property int selectedIndex: 0
   property string copiedKey: ""
+  property string revealedKey: ""    // hideCodes: the one code shown by Ctrl+R
   property real nowSec: Date.now() / 1000
 
   // Clipboard bookkeeping (see copyCode / clearClipboardIfOurs).
@@ -62,14 +65,18 @@ Panel {
   }
   readonly property bool closeOnCopy: boolSetting("closeOnCopy", true)
   readonly property bool notifyOnCopy: boolSetting("notifyOnCopy", true)
+  // The panel's own switch (saved in prefs) wins; until it is used, the plugin
+  // setting decides.
+  property var hideChoice: null
+  readonly property bool hideCodes: hideChoice === null ? boolSetting("hideCodes", false) : hideChoice === true
   readonly property string sortMode: {
     var v = String(settings && settings.sortMode || "recent")
     return (v === "alpha" || v === "vault") ? v : "recent"
   }
   readonly property int clipboardClearSec: {
     var raw = settings ? settings.clipboardClearSec : undefined
-    var n = parseInt(String(raw === undefined || raw === null ? 20 : raw), 10)
-    if (!isFinite(n) || n < 0) n = 20
+    var n = parseInt(String(raw === undefined || raw === null ? 60 : raw), 10)
+    if (!isFinite(n) || n < 0) n = 60
     return Math.min(n, 600)
   }
 
@@ -87,7 +94,8 @@ Panel {
   // This keeps a passer-by out of the panel; it does not encrypt the vault,
   // which any program running as you can still read.
   property bool lockReady: false     // lock-status has been read
-  property bool lockSet: false       // a password exists
+  property bool lockSet: false       // a password exists (or the lock file is damaged)
+  property bool lockDamaged: false   // lock.json exists but cannot be trusted
   property int unlockMinutes: 10     // 0 = lock as soon as the panel closes
   property bool unlocked: false
   property bool lockError: false
@@ -100,6 +108,7 @@ Panel {
   property string _lockAction: ""    // "set" | "remove" | "minutes"
   property string _pendingStdin: ""
   readonly property bool granted: lockReady && (!lockSet || unlocked)
+  readonly property string omarchyShellPath: "/usr/share/omarchy/bin/omarchy-shell"
   readonly property string lockToolPath: {
     var base = pluginDir
     if (base.length && base.charAt(base.length - 1) !== "/") base += "/"
@@ -146,6 +155,7 @@ Panel {
 
   function lock() {
     lockTimer.stop()
+    revealedKey = ""
     unlocked = false
     lockError = false
     showSettings = false
@@ -191,8 +201,23 @@ Panel {
   }
 
   function saveMinutes(n) {
+    if (n === unlockMinutes) return
+    if (lockSet && currentField.text.length === 0) {
+      loadLock()  // put the old value back in the field
+      showSettingsMsg("Type the current password above to change the time", true)
+      return
+    }
     _lockAction = "minutes"
-    runLock(lockSetProc, "lock-set", JSON.stringify({ minutes: n }))
+    var doc = { minutes: n }
+    if (lockSet) doc.current = currentField.text
+    runLock(lockSetProc, "lock-set", JSON.stringify(doc))
+  }
+
+  // Locks the panel now, without waiting for the timer.
+  function lockNow() {
+    if (!lockSet || lockDamaged) return
+    lock()
+    Qt.callLater(function() { passwordField.forceActiveFocus() })
   }
 
   function showSettingsMsg(text, isError) {
@@ -215,10 +240,12 @@ Panel {
         showSettingsMsg("Saved", false)
       }
     } else if (result === "bad-current") {
+      loadLock()
       showSettingsMsg("Current password is wrong", true)
     } else if (result === "bad-length") {
       showSettingsMsg("Use 4 to 256 characters", true)
     } else {
+      loadLock()
       showSettingsMsg("Could not save", true)
     }
   }
@@ -235,10 +262,13 @@ Panel {
       try {
         var d = JSON.parse(root._lockOut.length <= 1024 ? root._lockOut : "")
         root.lockSet = d.set === true
+        root.lockDamaged = d.damaged === true
         var n = parseInt(d.minutes, 10)
         root.unlockMinutes = (isFinite(n) && n >= 0 && n <= 1440) ? n : 10
       } catch (e) {
-        root.lockSet = false
+        // The helper could not report: keep the codes hidden rather than open.
+        root.lockSet = true
+        root.lockDamaged = true
       }
       root._lockOut = ""
       root.lockReady = true
@@ -285,6 +315,27 @@ Panel {
       stdinEnabled = false
       root.onLockSet(lockSetOut.text.trim())
     }
+  }
+
+  // Lock when Omarchy's screen lock is on (lock key, idle lock, before suspend).
+  Process {
+    id: screenLockCheck
+    running: false
+    command: [root.omarchyShellPath, "lock", "isLocked"]
+    stdout: StdioCollector {
+      id: screenLockOut
+      waitForEnd: true
+    }
+    onExited: if (screenLockOut.text.trim() === "true") root.lock()
+  }
+
+  // Omarchy sends no event for its screen lock, so this asks. One query costs
+  // about 20 ms, so every 10 s is ~0.2% of a core, and only while unlocked.
+  Timer {
+    interval: 10000
+    repeat: true
+    running: root.lockSet && !root.lockDamaged && root.unlocked
+    onTriggered: if (!screenLockCheck.running) screenLockCheck.running = true
   }
 
   Timer {
@@ -345,6 +396,7 @@ Panel {
           var d = JSON.parse(text.length <= 262144 ? text : "")
           root.pins = (d && typeof d.pins === "object" && d.pins) ? d.pins : {}
           root.used = (d && typeof d.used === "object" && d.used) ? d.used : {}
+          root.hideChoice = (d && typeof d.hide === "boolean") ? d.hide : null
         } catch (e) {
           root.pins = {}
           root.used = {}
@@ -359,7 +411,9 @@ Panel {
     command: []
     stdinEnabled: false
     onStarted: {
-      write(JSON.stringify({ pins: root.pins, used: root.used }) + "\n")
+      var doc = { pins: root.pins, used: root.used }
+      if (root.hideChoice !== null) doc.hide = root.hideChoice
+      write(JSON.stringify(doc) + "\n")
       stdinEnabled = false // EOF: the helper has the document
     }
     onExited: {
@@ -406,8 +460,16 @@ Panel {
 
   function refresh() { if (granted) svc.refresh() }
 
+  function toggleReveal() {
+    var row = selectedRow
+    if (!row) return
+    var key = Model.entryKey(row.entry)
+    revealedKey = revealedKey === key ? "" : key
+  }
+
   function moveCursor(dy) {
     if (rows.length === 0) return
+    revealedKey = ""
     selectedIndex = Math.max(0, Math.min(rows.length - 1, selectedIndex + dy))
     scrollCursorIntoView()
   }
@@ -502,6 +564,7 @@ Panel {
     } else {
       closeAfterCopy.stop()
       copiedKey = ""
+      revealedKey = ""
       svc.forget()
       if (lockSet && unlockMinutes === 0) lock()
     }
@@ -635,6 +698,9 @@ Panel {
     readonly property var entry: modelData.entry
     readonly property var st: Model.codeState(entry, root.nowSec)
     readonly property bool ending: st.remaining <= 5
+    // With hideCodes on, a code shows only under the mouse or after Ctrl+R.
+    readonly property bool shown: !root.hideCodes || hoverArea.containsMouse
+      || root.revealedKey === Model.entryKey(entry)
 
     implicitHeight: rowBody.implicitHeight + Style.spacing.rowPaddingX
     hasCursor: index === root.selectedIndex
@@ -642,6 +708,7 @@ Panel {
     foreground: root.barForeground
 
     MouseArea {
+      id: hoverArea
       anchors.fill: parent
       hoverEnabled: true
       acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -703,7 +770,7 @@ Panel {
         Text {
           anchors.right: parent.right
           textFormat: Text.PlainText
-          text: row.st.stale ? "··· ···" : Model.formatCode(row.st.code)
+          text: row.st.stale ? "··· ···" : row.shown ? Model.formatCode(row.st.code) : "••• •••"
           color: row.ending ? root.urgent : root.barForeground
           font.family: root.ff
           font.pixelSize: Style.font.subtitle
@@ -776,17 +843,39 @@ Panel {
       anchors.top: parent.top
       spacing: Style.space(10)
 
-      PanelSectionHeader {
-        text: root.lockReady ? "LOCKED" : "LOADING"
-        foreground: root.barForeground
-        fontFamily: root.ff
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        topPadding: Style.space(6)
+        text: root.lockDamaged ? "󰀦" : "󰌾"
+        color: root.lockDamaged ? root.urgent : Color.accent
+        font.family: root.ff
+        font.pixelSize: Style.space(34)
+      }
+
+      Text {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        text: root.lockReady ? "Authenticator is locked" : "Loading…"
+        color: root.barForeground
+        font.family: root.ff
+        font.pixelSize: Style.font.subtitle
+      }
+
+      Text {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        visible: root.lockReady && !root.lockDamaged
+        text: "Enter your password to show the codes"
+        color: root.dimForeground
+        font.family: root.ff
+        font.pixelSize: Style.font.caption
       }
 
       TextField {
         id: passwordField
         width: parent.width
         password: true
-        enabled: root.lockReady && root.lockoutLeft === 0
+        enabled: root.lockReady && root.lockoutLeft === 0 && !root.lockDamaged
         placeholderText: "Password"
         font.family: root.ff
         font.pixelSize: Style.font.body
@@ -810,11 +899,14 @@ Panel {
 
       Text {
         width: parent.width
-        text: root.lockoutLeft > 0 ? "Too many tries. Wait " + root.lockoutLeft + " s"
-          : root.lockError ? "Wrong password"
-          : root.unlockMinutes === 0 ? "Locks again when you close the panel"
-          : "Unlocks for " + root.unlockMinutes + " minutes"
-        color: (root.lockError || root.lockoutLeft > 0) ? root.urgent : root.dimForeground
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
+        text: root.lockDamaged ? "The lock file is damaged, so the panel stays locked. Remove lock.json in ~/.local/state/navjottomer.proton-authenticator/ to reset it."
+          : root.lockoutLeft > 0 ? "Too many tries. Wait " + root.lockoutLeft + " s"
+          : root.lockError ? "Wrong password. Try again."
+          : root.unlockMinutes === 0 ? "It locks again when you close the panel"
+          : "It stays open for " + root.unlockMinutes + (root.unlockMinutes === 1 ? " minute" : " minutes") + " after you unlock"
+        color: (root.lockError || root.lockoutLeft > 0 || root.lockDamaged) ? root.urgent : root.dimForeground
         font.family: root.ff
         font.pixelSize: Style.font.caption
       }
@@ -856,6 +948,10 @@ Panel {
             if (root.selectedRow) root.togglePin(root.selectedRow.entry)
           } else if (ctrl && event.key === Qt.Key_Comma) {
             root.openSettings()
+          } else if (ctrl && event.key === Qt.Key_R && root.hideCodes) {
+            root.toggleReveal()
+          } else if (ctrl && event.key === Qt.Key_L && root.lockSet) {
+            root.lockNow()
           } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
             root.switchPanel(shift || event.key === Qt.Key_Backtab ? -1 : 1)
           } else {
@@ -986,6 +1082,7 @@ Panel {
         Button {
           id: openButton
           width: parent.width - settingsButton.width - parent.spacing
+            - (lockNowButton.visible ? lockNowButton.width + parent.spacing : 0)
           iconText: "󰐕"
           iconSize: Style.font.icon
           text: "Add in Proton Authenticator"
@@ -999,11 +1096,26 @@ Panel {
         }
 
         Button {
-          id: settingsButton
-          iconText: root.lockSet ? "󰌾" : "󰌿"
+          id: lockNowButton
+          visible: root.lockSet
+          iconText: "󰌾"
           iconSize: Style.font.icon
           focusable: true
-          tooltipText: "Lock settings (Ctrl+,)"
+          tooltipText: "Lock now (Ctrl+L)"
+          foreground: root.barForeground
+          fontFamily: root.ff
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+          bordered: true
+          onClicked: root.lockNow()
+        }
+
+        Button {
+          id: settingsButton
+          iconText: "󰒓"
+          iconSize: Style.font.icon
+          focusable: true
+          tooltipText: "Settings (Ctrl+,)"
           foreground: root.barForeground
           fontFamily: root.ff
           horizontalPadding: Style.spacing.controlPaddingX
@@ -1024,7 +1136,7 @@ Panel {
       spacing: Style.space(10)
 
       PanelSectionHeader {
-        text: "LOCK SETTINGS"
+        text: "SETTINGS"
         foreground: root.barForeground
         fontFamily: root.ff
       }
@@ -1106,9 +1218,28 @@ Panel {
 
       PanelSeparator { foreground: root.barForeground }
 
+      Button {
+        width: parent.width
+        focusable: true
+        iconText: root.hideCodes ? "󰈉" : "󰈈"
+        iconSize: Style.font.icon
+        text: root.hideCodes ? "Codes hidden until hovered or Ctrl+R: on" : "Hide codes until hovered or Ctrl+R: off"
+        fontSize: Style.font.bodySmall
+        foreground: root.barForeground
+        fontFamily: root.ff
+        horizontalPadding: Style.spacing.controlPaddingX
+        verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+        bordered: true
+        onClicked: {
+          root.hideChoice = !root.hideCodes
+          root.revealedKey = ""
+          root.savePrefs()
+        }
+      }
+
       NumberField {
         width: parent.width
-        label: "Stay unlocked (minutes, 0 = until closed)"
+        label: root.lockSet ? "Stay unlocked (minutes; needs current password)" : "Stay unlocked (minutes, 0 = until closed)"
         value: root.unlockMinutes
         from: 0
         to: 1440
