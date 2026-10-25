@@ -1,8 +1,17 @@
 #!/usr/bin/python3
-"""Read or write the panel's preferences (pinned and recently used accounts).
+"""Read or write the panel's preferences (pinned and recently used accounts)
+and its optional password lock.
 
-  protonauth-prefs read     print the stored prefs as one JSON line
-  protonauth-prefs write    replace them with the JSON document on stdin
+  protonauth-prefs read         print the stored prefs as one JSON line
+  protonauth-prefs write        replace them with the JSON document on stdin
+  protonauth-prefs lock-status  print {"set": bool, "minutes": int}
+  protonauth-prefs lock-verify  check the password on stdin; prints ok or no
+  protonauth-prefs lock-set     change the lock from a JSON document on stdin;
+                                prints ok or an error code
+
+The lock lives next to the prefs in lock.json (mode 0600): a random salt, an
+scrypt hash of the password, and the auto-lock minutes. The password is only
+ever read from stdin and is never written anywhere.
 
 The file lives in $XDG_STATE_HOME/navjottomer.proton-authenticator/ (default
 ~/.local/state/...). That directory must be a real directory owned by this
@@ -17,6 +26,10 @@ Output and input are bounded and validated: only {"pins": {key: true},
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import json
 import os
 import stat
@@ -29,6 +42,14 @@ MAX_BYTES = 256 * 1024
 MAX_KEYS = 2000
 MAX_KEY_CHARS = 300
 EMPTY = {"pins": {}, "used": {}}
+
+LOCK_FILE = "lock.json"
+LOCK_MAX_BYTES = 4096
+PASSWORD_MIN_CHARS = 4
+PASSWORD_MAX_CHARS = 256
+DEFAULT_MINUTES = 10
+MAX_MINUTES = 1440
+SCRYPT = {"n": 2**15, "r": 8, "p": 1, "maxmem": 128 * 1024 * 1024, "dklen": 32}
 
 
 def state_dir() -> Path:
@@ -99,12 +120,8 @@ def read() -> dict:
         return dict(EMPTY)
 
 
-def write(raw: bytes) -> None:
-    if len(raw) > MAX_BYTES:
-        raise SystemExit("prefs too large")
-    data = clean(json.loads(raw))
-    d = checked_dir(create=True)
-    fd, tmp = tempfile.mkstemp(prefix=".prefs.", suffix=".tmp", dir=d)  # O_EXCL, 0600
+def atomic_write(d: Path, name: str, data: object) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=d)  # O_EXCL, 0600
     try:
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh, separators=(",", ":"))
@@ -112,13 +129,124 @@ def write(raw: bytes) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         # rename() replaces the name itself; it never follows a symlink there.
-        os.replace(tmp, d / "prefs.json")
+        os.replace(tmp, d / name)
     except BaseException:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
         raise
+
+
+def write(raw: bytes) -> None:
+    if len(raw) > MAX_BYTES:
+        raise SystemExit("prefs too large")
+    data = clean(json.loads(raw))
+    atomic_write(checked_dir(create=True), "prefs.json", data)
+
+
+# ---------- Lock ----------
+
+def clamp_minutes(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_MINUTES
+    return max(0, min(value, MAX_MINUTES))
+
+
+def hash_password(password: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(password.encode(), salt=salt, **SCRYPT)
+
+
+def read_lock() -> dict:
+    """{"salt": bytes|None, "hash": bytes|None, "minutes": int}; a missing or
+    damaged file means no password is set."""
+    empty = {"salt": None, "hash": None, "minutes": DEFAULT_MINUTES}
+    d = checked_dir(create=False)
+    if d is None:
+        return empty
+    try:
+        fd = os.open(d / LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return empty
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return empty
+        raw = fh.read(LOCK_MAX_BYTES + 1)
+    if len(raw) > LOCK_MAX_BYTES:
+        return empty
+    try:
+        doc = json.loads(raw)
+        minutes = clamp_minutes(doc.get("minutes", DEFAULT_MINUTES))
+        salt, digest = doc.get("salt"), doc.get("hash")
+        if salt is None and digest is None:
+            return {**empty, "minutes": minutes}
+        salt = base64.b64decode(salt, validate=True)
+        digest = base64.b64decode(digest, validate=True)
+    except (ValueError, TypeError, AttributeError, binascii.Error):
+        return empty
+    if len(salt) != 16 or len(digest) != SCRYPT["dklen"]:
+        return empty
+    return {"salt": salt, "hash": digest, "minutes": minutes}
+
+
+def write_lock(salt: bytes | None, digest: bytes | None, minutes: int) -> None:
+    b64 = lambda b: None if b is None else base64.b64encode(b).decode()
+    atomic_write(checked_dir(create=True), LOCK_FILE,
+                 {"v": 1, "salt": b64(salt), "hash": b64(digest), "minutes": minutes})
+
+
+def check_password(lock: dict, password: object) -> bool:
+    if lock["hash"] is None:
+        return True
+    if not isinstance(password, str) or len(password) > PASSWORD_MAX_CHARS:
+        return False
+    return hmac.compare_digest(hash_password(password, lock["salt"]), lock["hash"])
+
+
+def lock_status() -> dict:
+    lock = read_lock()
+    return {"set": lock["hash"] is not None, "minutes": lock["minutes"]}
+
+
+def lock_verify(raw: bytes) -> str:
+    lock = read_lock()
+    password = raw.decode("utf-8", "replace").rstrip("\n")
+    return "ok" if lock["hash"] is not None and check_password(lock, password) else "no"
+
+
+def lock_set(raw: bytes) -> str:
+    """Document: {"current": str, "password": str, "minutes": int}, every key
+    optional. A new or empty password (removal) needs the current one when a
+    password is already set; "minutes" alone needs nothing."""
+    if len(raw) > LOCK_MAX_BYTES:
+        return "bad-input"
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return "bad-input"
+    if not isinstance(doc, dict):
+        return "bad-input"
+    lock = read_lock()
+    salt, digest, minutes = lock["salt"], lock["hash"], lock["minutes"]
+    if "minutes" in doc:
+        if isinstance(doc["minutes"], bool) or not isinstance(doc["minutes"], int):
+            return "bad-input"
+        minutes = clamp_minutes(doc["minutes"])
+    if "password" in doc:
+        new = doc["password"]
+        if not isinstance(new, str):
+            return "bad-input"
+        if not check_password(lock, doc.get("current", "")):
+            return "bad-current"
+        if new == "":
+            salt = digest = None
+        elif PASSWORD_MIN_CHARS <= len(new) <= PASSWORD_MAX_CHARS:
+            salt = os.urandom(16)
+            digest = hash_password(new, salt)
+        else:
+            return "bad-length"
+    write_lock(salt, digest, minutes)
+    return "ok"
 
 
 def main() -> int:
@@ -129,8 +257,17 @@ def main() -> int:
     if cmd == "write":
         write(sys.stdin.buffer.read(MAX_BYTES + 1))
         return 0
+    if cmd == "lock-status":
+        print(json.dumps(lock_status(), separators=(",", ":")))
+        return 0
+    if cmd == "lock-verify":
+        print(lock_verify(sys.stdin.buffer.read(PASSWORD_MAX_CHARS * 4 + 2)))
+        return 0
+    if cmd == "lock-set":
+        print(lock_set(sys.stdin.buffer.read(LOCK_MAX_BYTES + 1)))
+        return 0
     print(__doc__.strip().splitlines()[0], file=sys.stderr)
-    print("usage: protonauth-prefs read|write", file=sys.stderr)
+    print("usage: protonauth-prefs read|write|lock-status|lock-verify|lock-set", file=sys.stderr)
     return 2
 
 

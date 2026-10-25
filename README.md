@@ -18,6 +18,8 @@ your clipboard. No app window, no network.
   fonts and borders match the built-in panels.
 - **Clipboard hygiene.** Codes are copied with `--sensitive` and cleared after
   20 seconds if they are still on the clipboard.
+- **Optional password lock.** Set a password in the panel's lock settings and
+  the codes stay hidden until you enter it. See [Password lock](#password-lock).
 - **Light.** The vault is read about once every five minutes while the panel
   is open, not every second.
 
@@ -64,8 +66,8 @@ omarchy plugin remove navjottomer.proton-authenticator
 
 If you added the hotkey, delete that line from `bindings.lua`. The plugin also
 leaves a small state folder you can delete:
-`~/.local/state/navjottomer.proton-authenticator/` (pinned accounts and
-last-used times).
+`~/.local/state/navjottomer.proton-authenticator/` (pinned accounts,
+last-used times and the optional lock).
 
 ## Usage
 
@@ -87,6 +89,28 @@ accounts.
 
 From scripts: `omarchy-shell navjottomer.proton-authenticator toggle`
 (also `open`, `close`, `refresh`, `clearClipboard`).
+
+## Password lock
+
+Off by default. Click the lock button next to **Add in Proton Authenticator**
+(or press Ctrl+,) to open the lock settings:
+
+- **Set, change or remove the password.** Changing or removing it asks for the
+  current one. Use 4 to 256 characters.
+- **Stay unlocked for N minutes.** After a correct password the panel stays
+  open for this long, then locks again. `0` locks it as soon as you close the
+  panel. Default 10.
+
+While locked, no codes are read from the vault. After three wrong passwords the
+field waits 5 seconds, then 10, up to 30. Restarting the shell locks it again.
+
+The password is stored as a salted scrypt hash in
+`~/.local/state/navjottomer.proton-authenticator/lock.json` (mode 600) and is
+only passed to the helper on stdin. Forgot it? Delete that file.
+
+This keeps a passer-by out of the panel. It does not encrypt anything: the
+vault itself is still readable by any program running as you, and the Proton
+Authenticator app has its own lock.
 
 ## Settings
 
@@ -124,8 +148,9 @@ again when the codes run low, about every five minutes.
 - **The clipboard is never read into the shell.** Clearing checks the clipboard
   in a separate short-lived process (`bin/protonauth-clipcheck`), which only
   answers "match" or "no match".
-- **Stored data.** Only pinned entry IDs and last-used times, in
-  `~/.local/state/navjottomer.proton-authenticator/prefs.json`. The folder must
+- **Stored data.** Pinned entry IDs and last-used times in
+  `~/.local/state/navjottomer.proton-authenticator/prefs.json`, and the lock's
+  password hash and timer in `lock.json` beside it. The folder must
   be private (mode 700, owned by you, not a symlink) or it is refused; the file
   is written to a temp file and renamed into place, and is never read or
   written through a symlink (`bin/protonauth-prefs`).

@@ -75,7 +75,229 @@ Panel {
 
   Component.onCompleted: {
     loadPrefs()
+    loadLock()
     svc.check()
+  }
+
+  // ---------- Lock ----------
+  // Optional password gate in front of the codes, set up in the panel's Lock
+  // settings. Nothing is fetched while locked, and "unlocked" lives in memory
+  // only, so restarting the shell locks it again. The password is hashed by
+  // bin/protonauth-prefs (scrypt, salted) and only ever passed on stdin.
+  // This keeps a passer-by out of the panel; it does not encrypt the vault,
+  // which any program running as you can still read.
+  property bool lockReady: false     // lock-status has been read
+  property bool lockSet: false       // a password exists
+  property int unlockMinutes: 10     // 0 = lock as soon as the panel closes
+  property bool unlocked: false
+  property bool lockError: false
+  property int lockFailures: 0
+  property int lockoutLeft: 0        // seconds the password field stays disabled
+  property bool showSettings: false
+  property string settingsMsg: ""
+  property bool settingsMsgError: false
+  property string _lockOut: ""
+  property string _lockAction: ""    // "set" | "remove" | "minutes"
+  property string _pendingStdin: ""
+  readonly property bool granted: lockReady && (!lockSet || unlocked)
+  readonly property string lockToolPath: {
+    var base = pluginDir
+    if (base.length && base.charAt(base.length - 1) !== "/") base += "/"
+    return base + "bin/protonauth-prefs"
+  }
+
+  // Runs a lock-* command of the prefs helper, feeding it `input` on stdin.
+  function runLock(proc, cmd, input) {
+    if (proc.running || !lockToolPath.endsWith("/bin/protonauth-prefs")) return false
+    _pendingStdin = input
+    proc.command = [lockToolPath, cmd]
+    proc.stdinEnabled = input.length > 0
+    proc.running = true
+    return true
+  }
+
+  function loadLock() { runLock(lockStatus, "lock-status", "") }
+
+  function tryUnlock() {
+    if (lockoutLeft > 0 || passwordField.text.length === 0) return
+    if (!runLock(lockVerify, "lock-verify", passwordField.text)) return
+    passwordField.text = ""
+  }
+
+  function onVerified(ok) {
+    if (!ok) {
+      lockFailures += 1
+      lockError = true
+      // Free for the first few tries, then 5 s more per miss, up to 30 s.
+      if (lockFailures >= 3) lockoutLeft = Math.min(30, (lockFailures - 2) * 5)
+      return
+    }
+    lockFailures = 0
+    lockError = false
+    markUnlocked()
+  }
+
+  function markUnlocked() {
+    unlocked = true
+    if (unlockMinutes > 0) lockTimer.restart()
+    refresh()
+    Qt.callLater(function() { if (root.opened) searchField.forceActiveFocus() })
+  }
+
+  function lock() {
+    lockTimer.stop()
+    unlocked = false
+    lockError = false
+    showSettings = false
+    clearSettingsFields()
+    searchText = ""
+    searchField.text = ""
+    passwordField.text = ""
+    svc.forget()
+    if (opened) Qt.callLater(function() { passwordField.forceActiveFocus() })
+  }
+
+  function clearSettingsFields() {
+    currentField.text = ""
+    newField.text = ""
+    confirmField.text = ""
+    settingsMsg = ""
+  }
+
+  function openSettings() {
+    clearSettingsFields()
+    showSettings = true
+    Qt.callLater(function() { (root.lockSet ? currentField : newField).forceActiveFocus() })
+  }
+
+  function closeSettings() {
+    showSettings = false
+    clearSettingsFields()
+    Qt.callLater(function() { searchField.forceActiveFocus() })
+  }
+
+  function savePassword(remove) {
+    if (!remove) {
+      if (newField.text.length < 4) { showSettingsMsg("Use at least 4 characters", true); return }
+      if (newField.text !== confirmField.text) { showSettingsMsg("Passwords don't match", true); return }
+    }
+    var doc = { password: remove ? "" : newField.text }
+    if (lockSet) doc.current = currentField.text
+    _lockAction = remove ? "remove" : "set"
+    if (!runLock(lockSetProc, "lock-set", JSON.stringify(doc))) return
+    currentField.text = ""
+    newField.text = ""
+    confirmField.text = ""
+  }
+
+  function saveMinutes(n) {
+    _lockAction = "minutes"
+    runLock(lockSetProc, "lock-set", JSON.stringify({ minutes: n }))
+  }
+
+  function showSettingsMsg(text, isError) {
+    settingsMsg = text
+    settingsMsgError = isError
+  }
+
+  function onLockSet(result) {
+    if (result === "ok") {
+      var action = _lockAction
+      loadLock()
+      if (action === "set") {
+        // Setting or changing the password must not lock you out of the panel.
+        lockSet = true
+        showSettingsMsg("Password saved", false)
+        markUnlocked()
+      } else if (action === "remove") {
+        showSettingsMsg("Password removed. The panel is open to anyone.", false)
+      } else {
+        showSettingsMsg("Saved", false)
+      }
+    } else if (result === "bad-current") {
+      showSettingsMsg("Current password is wrong", true)
+    } else if (result === "bad-length") {
+      showSettingsMsg("Use 4 to 256 characters", true)
+    } else {
+      showSettingsMsg("Could not save", true)
+    }
+  }
+
+  Process {
+    id: lockStatus
+    running: false
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root._lockOut = text
+    }
+    onExited: {
+      try {
+        var d = JSON.parse(root._lockOut.length <= 1024 ? root._lockOut : "")
+        root.lockSet = d.set === true
+        var n = parseInt(d.minutes, 10)
+        root.unlockMinutes = (isFinite(n) && n >= 0 && n <= 1440) ? n : 10
+      } catch (e) {
+        root.lockSet = false
+      }
+      root._lockOut = ""
+      root.lockReady = true
+    }
+  }
+
+  Process {
+    id: lockVerify
+    running: false
+    command: []
+    stdinEnabled: false
+    stdout: StdioCollector {
+      id: lockVerifyOut
+      waitForEnd: true
+    }
+    onStarted: {
+      write(root._pendingStdin)
+      root._pendingStdin = ""
+      stdinEnabled = false
+    }
+    onExited: {
+      root._pendingStdin = ""
+      stdinEnabled = false
+      root.onVerified(lockVerifyOut.text === "ok\n")
+    }
+  }
+
+  Process {
+    id: lockSetProc
+    running: false
+    command: []
+    stdinEnabled: false
+    stdout: StdioCollector {
+      id: lockSetOut
+      waitForEnd: true
+    }
+    onStarted: {
+      write(root._pendingStdin)
+      root._pendingStdin = ""
+      stdinEnabled = false
+    }
+    onExited: {
+      root._pendingStdin = ""
+      stdinEnabled = false
+      root.onLockSet(lockSetOut.text.trim())
+    }
+  }
+
+  Timer {
+    id: lockTimer
+    interval: Math.max(1, root.unlockMinutes) * 60 * 1000
+    onTriggered: root.lock()
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.lockoutLeft > 0
+    onTriggered: root.lockoutLeft -= 1
   }
 
   // ---------- Pins and recent use ----------
@@ -182,7 +404,7 @@ Panel {
     listFlick.contentY = 0
   }
 
-  function refresh() { svc.refresh() }
+  function refresh() { if (granted) svc.refresh() }
 
   function moveCursor(dy) {
     if (rows.length === 0) return
@@ -271,11 +493,17 @@ Panel {
       selectedIndex = 0
       listFlick.contentY = 0
       nowSec = Date.now() / 1000
+      lockError = false
+      showSettings = false
+      clearSettingsFields()
+      passwordField.text = ""
+      loadLock()
       refresh()
     } else {
       closeAfterCopy.stop()
       copiedKey = ""
       svc.forget()
+      if (lockSet && unlockMinutes === 0) lock()
     }
   }
 
@@ -507,6 +735,24 @@ Panel {
     }
   }
 
+  // Password input used by the Lock settings: Esc goes back, Enter submits.
+  component SettingsField: TextField {
+    signal submit()
+    width: parent.width
+    password: true
+    font.family: root.ff
+    font.pixelSize: Style.font.body
+    foreground: root.barForeground
+    onTextChanged: if (text.length) root.settingsMsg = ""
+
+    Keys.onPressed: function(event) {
+      if (event.key === Qt.Key_Escape) root.closeSettings()
+      else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) submit()
+      else return
+      event.accepted = true
+    }
+  }
+
   // ---------- Panel ----------
   KeyboardPanel {
     id: panel
@@ -514,12 +760,69 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: searchField
+    focusTarget: !root.granted ? passwordField
+      : root.showSettings ? (root.lockSet ? currentField : newField) : searchField
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(
+      !root.granted ? lockColumn.implicitHeight
+        : root.showSettings ? settingsColumn.implicitHeight : column.implicitHeight,
+      Style.space(560))
+
+    Column {
+      id: lockColumn
+      visible: !root.granted
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      spacing: Style.space(10)
+
+      PanelSectionHeader {
+        text: root.lockReady ? "LOCKED" : "LOADING"
+        foreground: root.barForeground
+        fontFamily: root.ff
+      }
+
+      TextField {
+        id: passwordField
+        width: parent.width
+        password: true
+        enabled: root.lockReady && root.lockoutLeft === 0
+        placeholderText: "Password"
+        font.family: root.ff
+        font.pixelSize: Style.font.body
+        foreground: root.barForeground
+        onTextChanged: if (text.length) root.lockError = false
+
+        Keys.onPressed: function(event) {
+          var shift = event.modifiers & Qt.ShiftModifier
+          if (event.key === Qt.Key_Escape) {
+            root.close()
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.tryUnlock()
+          } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            root.switchPanel(shift || event.key === Qt.Key_Backtab ? -1 : 1)
+          } else {
+            return
+          }
+          event.accepted = true
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: root.lockoutLeft > 0 ? "Too many tries. Wait " + root.lockoutLeft + " s"
+          : root.lockError ? "Wrong password"
+          : root.unlockMinutes === 0 ? "Locks again when you close the panel"
+          : "Unlocks for " + root.unlockMinutes + " minutes"
+        color: (root.lockError || root.lockoutLeft > 0) ? root.urgent : root.dimForeground
+        font.family: root.ff
+        font.pixelSize: Style.font.caption
+      }
+    }
 
     Column {
       id: column
+      visible: root.granted && !root.showSettings
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
@@ -551,6 +854,8 @@ Panel {
             root.copySelected(!!shift)
           } else if (ctrl && event.key === Qt.Key_P) {
             if (root.selectedRow) root.togglePin(root.selectedRow.entry)
+          } else if (ctrl && event.key === Qt.Key_Comma) {
+            root.openSettings()
           } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
             root.switchPanel(shift || event.key === Qt.Key_Backtab ? -1 : 1)
           } else {
@@ -611,7 +916,7 @@ Panel {
             var cardCap = panel.availableCardHeight > 0
               ? Math.min(Style.space(560), panel.availableCardHeight) : Style.space(560)
             var fixed = searchField.height + separatorTop.height + separatorA.height + separatorB.height
-              + listHeader.height + footer.height + openButton.height
+              + listHeader.height + footer.height + bottomRow.height
               + (statusText.visible ? statusText.height + listSection.spacing : 0)
               + column.spacing * 6 + listSection.spacing
             return Math.max(Style.space(44), cardCap - panel.verticalContentInset - fixed)
@@ -673,19 +978,162 @@ Panel {
 
       PanelSeparator { id: separatorB; foreground: root.barForeground }
 
-      Button {
-        id: openButton
+      Row {
+        id: bottomRow
         width: parent.width
-        iconText: "󰐕"
+        spacing: Style.space(6)
+
+        Button {
+          id: openButton
+          width: parent.width - settingsButton.width - parent.spacing
+          iconText: "󰐕"
+          iconSize: Style.font.icon
+          text: "Add in Proton Authenticator"
+          fontSize: Style.font.bodySmall
+          foreground: root.barForeground
+          fontFamily: root.ff
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+          bordered: true
+          onClicked: root.openApp()
+        }
+
+        Button {
+          id: settingsButton
+          iconText: root.lockSet ? "󰌾" : "󰌿"
+          iconSize: Style.font.icon
+          focusable: true
+          tooltipText: "Lock settings (Ctrl+,)"
+          foreground: root.barForeground
+          fontFamily: root.ff
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+          bordered: true
+          onClicked: root.openSettings()
+        }
+      }
+    }
+
+    // Lock settings: password and how long the panel stays open after unlock.
+    Column {
+      id: settingsColumn
+      visible: root.granted && root.showSettings
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      spacing: Style.space(10)
+
+      PanelSectionHeader {
+        text: "LOCK SETTINGS"
+        foreground: root.barForeground
+        fontFamily: root.ff
+      }
+
+      Text {
+        width: parent.width
+        text: root.lockSet
+          ? "Codes are hidden until you enter the password."
+          : "No password set. Anyone who opens the panel sees your codes."
+        color: root.dimForeground
+        font.family: root.ff
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      SettingsField {
+        id: currentField
+        visible: root.lockSet
+        placeholderText: "Current password"
+        KeyNavigation.tab: newField
+      }
+
+      SettingsField {
+        id: newField
+        placeholderText: root.lockSet ? "New password" : "Password"
+        KeyNavigation.tab: confirmField
+      }
+
+      SettingsField {
+        id: confirmField
+        placeholderText: "Repeat password"
+        onSubmit: root.savePassword(false)
+        KeyNavigation.tab: saveButton
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+
+        Button {
+          id: saveButton
+          width: root.lockSet ? (parent.width - parent.spacing) / 2 : parent.width
+          focusable: true
+          text: root.lockSet ? "Change password" : "Set password"
+          fontSize: Style.font.bodySmall
+          foreground: root.barForeground
+          fontFamily: root.ff
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+          bordered: true
+          onClicked: root.savePassword(false)
+        }
+
+        Button {
+          id: removeButton
+          visible: root.lockSet
+          width: (parent.width - parent.spacing) / 2
+          focusable: true
+          text: "Remove"
+          fontSize: Style.font.bodySmall
+          foreground: root.barForeground
+          fontFamily: root.ff
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+          bordered: true
+          onClicked: root.savePassword(true)
+        }
+      }
+
+      Text {
+        width: parent.width
+        visible: text.length > 0
+        text: root.settingsMsg
+        color: root.settingsMsgError ? root.urgent : root.dimForeground
+        font.family: root.ff
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      PanelSeparator { foreground: root.barForeground }
+
+      NumberField {
+        width: parent.width
+        label: "Stay unlocked (minutes, 0 = until closed)"
+        value: root.unlockMinutes
+        from: 0
+        to: 1440
+        stepSize: 5
+        foreground: root.barForeground
+        fontFamily: root.ff
+        fontSize: Style.font.bodySmall
+        onModified: function(v) { root.saveMinutes(v) }
+      }
+
+      PanelSeparator { foreground: root.barForeground }
+
+      Button {
+        width: parent.width
+        focusable: true
+        iconText: "󰁍"
         iconSize: Style.font.icon
-        text: "Add in Proton Authenticator"
+        text: "Back"
         fontSize: Style.font.bodySmall
         foreground: root.barForeground
         fontFamily: root.ff
         horizontalPadding: Style.spacing.controlPaddingX
         verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
         bordered: true
-        onClicked: root.openApp()
+        onClicked: root.closeSettings()
       }
     }
   }
