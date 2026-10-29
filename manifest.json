@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "navjottomer.proton-authenticator",
   "name": "Authenticator",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "author": "navjottomer",
   "license": "MIT",
   "description": "Proton Authenticator TOTP codes in the Omarchy bar: type to search, Enter to copy, pinned and recently used first. Reads the official app's local vault; no network.",

@@ -107,6 +107,8 @@ Panel {
   property string _lockOut: ""
   property string _lockAction: ""    // "set" | "remove" | "minutes"
   property string _pendingStdin: ""
+  property int _lockGen: 0           // bumped on every lock and close
+  property int _checkGen: 0          // _lockGen when the running check began
   readonly property bool granted: lockReady && (!lockSet || unlocked)
   readonly property string omarchyShellPath: "/usr/share/omarchy/bin/omarchy-shell"
   readonly property string lockToolPath: {
@@ -130,10 +132,13 @@ Panel {
   function tryUnlock() {
     if (lockoutLeft > 0 || passwordField.text.length === 0) return
     if (!runLock(lockVerify, "lock-verify", passwordField.text)) return
+    _checkGen = _lockGen
     passwordField.text = ""
   }
 
   function onVerified(ok) {
+    // The panel closed or locked while the check ran: its answer is stale.
+    if (!opened || _checkGen !== _lockGen) return
     if (!ok) {
       lockFailures += 1
       lockError = true
@@ -154,6 +159,7 @@ Panel {
   }
 
   function lock() {
+    _lockGen += 1
     lockTimer.stop()
     revealedKey = ""
     unlocked = false
@@ -194,6 +200,7 @@ Panel {
     var doc = { password: remove ? "" : newField.text }
     if (lockSet) doc.current = currentField.text
     _lockAction = remove ? "remove" : "set"
+    _checkGen = _lockGen
     if (!runLock(lockSetProc, "lock-set", JSON.stringify(doc))) return
     currentField.text = ""
     newField.text = ""
@@ -233,7 +240,7 @@ Panel {
         // Setting or changing the password must not lock you out of the panel.
         lockSet = true
         showSettingsMsg("Password saved", false)
-        markUnlocked()
+        if (opened && _checkGen === _lockGen) markUnlocked()
       } else if (action === "remove") {
         showSettingsMsg("Password removed. The panel is open to anyone.", false)
       } else {
@@ -562,6 +569,7 @@ Panel {
       loadLock()
       refresh()
     } else {
+      _lockGen += 1
       closeAfterCopy.stop()
       copiedKey = ""
       revealedKey = ""
@@ -1055,6 +1063,7 @@ Panel {
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
           text: root.selectedState && root.selectedState.next
+            && (!root.hideCodes || root.revealedKey === Model.entryKey(root.selectedRow.entry))
             ? "󰒭  " + Model.formatCode(root.selectedState.next) : ""
           color: root.dimForeground
           font.family: root.ff
