@@ -108,7 +108,8 @@ Panel {
   property string _lockAction: ""    // "set" | "remove" | "minutes"
   property string _pendingStdin: ""
   property int _lockGen: 0           // bumped on every lock and close
-  property int _checkGen: 0          // _lockGen when the running check began
+  property int _verifyGen: 0         // _lockGen when the running password check began
+  property int _setGen: 0            // _lockGen when the running password change began
   readonly property bool granted: lockReady && (!lockSet || unlocked)
   readonly property string omarchyShellPath: "/usr/share/omarchy/bin/omarchy-shell"
   readonly property string lockToolPath: {
@@ -131,14 +132,15 @@ Panel {
 
   function tryUnlock() {
     if (lockoutLeft > 0 || passwordField.text.length === 0) return
+    if (lockSetProc.running) return  // a password change is still running
     if (!runLock(lockVerify, "lock-verify", passwordField.text)) return
-    _checkGen = _lockGen
+    _verifyGen = _lockGen
     passwordField.text = ""
   }
 
   function onVerified(ok) {
     // The panel closed or locked while the check ran: its answer is stale.
-    if (!opened || _checkGen !== _lockGen) return
+    if (!opened || _verifyGen !== _lockGen) return
     if (!ok) {
       lockFailures += 1
       lockError = true
@@ -200,8 +202,8 @@ Panel {
     var doc = { password: remove ? "" : newField.text }
     if (lockSet) doc.current = currentField.text
     _lockAction = remove ? "remove" : "set"
-    _checkGen = _lockGen
     if (!runLock(lockSetProc, "lock-set", JSON.stringify(doc))) return
+    _setGen = _lockGen
     currentField.text = ""
     newField.text = ""
     confirmField.text = ""
@@ -240,7 +242,7 @@ Panel {
         // Setting or changing the password must not lock you out of the panel.
         lockSet = true
         showSettingsMsg("Password saved", false)
-        if (opened && _checkGen === _lockGen) markUnlocked()
+        if (opened && _setGen === _lockGen) markUnlocked()
       } else if (action === "remove") {
         showSettingsMsg("Password removed. The panel is open to anyone.", false)
       } else {
